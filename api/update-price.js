@@ -1,4 +1,4 @@
-const axios = require("axios");
+const https = require("https");
 
 const SHOPIFY_STORE = "keniwear.myshopify.com";
 const GST_PCT = 3;
@@ -11,49 +11,66 @@ const PURITY_KEYS = {
   "24K": "gold_rate_24k"
 };
 
-module.exports = async (req, res) => {
-  // Handle CORS preflight
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
+function shopifyRequest(method, path, body, token) {
+  return new Promise((resolve, reject) => {
+    const data = body ? JSON.stringify(body) : null;
+    const options = {
+      hostname: SHOPIFY_STORE,
+      path: `/admin/api/2024-01${path}`,
+      method,
+      headers: {
+        "X-Shopify-Access-Token": token,
+        "Content-Type": "application/json",
+        ...(data && { "Content-Length": Buffer.byteLength(data) })
+      }
+    };
 
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+    const req = https.request(options, (res) => {
+      let responseData = "";
+      res.on("data", chunk => responseData += chunk);
+      res.on("end", () => {
+        try {
+          resolve({ status: res.statusCode, data: JSON.parse(responseData) });
+        } catch {
+          resolve({ status: res.statusCode, data: responseData });
+        }
+      });
+    });
+
+    req.on("error", reject);
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+module.exports = async (req, res) => {
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   const SHOPIFY_TOKEN = process.env.SHOPIFY_TOKEN;
-
-  if (!SHOPIFY_TOKEN) {
-    return res.status(500).json({ error: "Shopify token not configured" });
-  }
-
-  const headers = {
-    "X-Shopify-Access-Token": SHOPIFY_TOKEN,
-    "Content-Type": "application/json"
-  };
+  if (!SHOPIFY_TOKEN) return res.status(500).json({ error: "SHOPIFY_TOKEN not set" });
 
   try {
     const { variantId, productId } = req.body;
-
     if (!variantId || !productId) {
-      return res.status(400).json({ error: "variantId and productId are required" });
+      return res.status(400).json({ error: "variantId and productId required" });
     }
 
     // 1. Get shop metafields (gold rates)
-    const shopRes = await axios.get(
-      `https://${SHOPIFY_STORE}/admin/api/2024-01/metafields.json?namespace=custom`,
-      { headers }
-    );
+    const shopRes = await shopifyRequest("GET", "/metafields.json?namespace=custom", null, SHOPIFY_TOKEN);
+    if (shopRes.status !== 200) {
+      return res.status(500).json({ error: "Failed to fetch shop metafields", status: shopRes.status });
+    }
     const rates = {};
     for (const mf of shopRes.data.metafields) {
       rates[mf.key] = parseFloat(mf.value) || 0;
     }
 
-    // 2. Get product metafields (weight + making %)
-    const prodRes = await axios.get(
-      `https://${SHOPIFY_STORE}/admin/api/2024-01/products/${productId}/metafields.json?namespace=custom`,
-      { headers }
-    );
+    // 2. Get product metafields
+    const prodRes = await shopifyRequest("GET", `/products/${productId}/metafields.json?namespace=custom`, null, SHOPIFY_TOKEN);
+    if (prodRes.status !== 200) {
+      return res.status(500).json({ error: "Failed to fetch product metafields", status: prodRes.status });
+    }
     const productMeta = {};
     for (const mf of prodRes.data.metafields) {
       productMeta[mf.key] = parseFloat(mf.value) || 0;
@@ -63,57 +80,53 @@ module.exports = async (req, res) => {
     const makingPct = productMeta["making_percent"] || 0;
 
     if (!weight || !makingPct) {
-      return res.status(400).json({ error: "Product gold_weight or making_percent metafield is missing" });
+      return res.status(400).json({ error: "Product metafields missing: gold_weight or making_percent" });
     }
 
-    // 3. Get variant title to determine purity
-    const variantRes = await axios.get(
-      `https://${SHOPIFY_STORE}/admin/api/2024-01/variants/${variantId}.json`,
-      { headers }
-    );
+    // 3. Get variant title
+    const variantRes = await shopifyRequest("GET", `/variants/${variantId}.json`, null, SHOPIFY_TOKEN);
+    if (variantRes.status !== 200) {
+      return res.status(500).json({ error: "Failed to fetch variant", status: variantRes.status });
+    }
     const variantTitle = variantRes.data.variant.title;
 
-    // 4. Match purity and get gold rate
+    // 4. Find gold rate for purity
     let goldRate = 0;
     for (const [purity, key] of Object.entries(PURITY_KEYS)) {
-      if (variantTitle.includes(purity)) {
+      if (variantTitle.toUpperCase().includes(purity)) {
         goldRate = rates[key] || 0;
         break;
       }
     }
 
     if (!goldRate) {
-      return res.status(400).json({
-        error: `Gold rate not found for purity: ${variantTitle}. Please update shop metafields.`
-      });
+      return res.status(400).json({ error: `No gold rate found for: ${variantTitle}` });
     }
 
-    // 5. Calculate final price using formula
-    // Gold Value = Weight × Gold Rate
-    // Making Charges = Making % × Gold Value
-    // GST = 3% × (Gold Value + Making Charges)
-    // Final Price = Gold Value + Making Charges + GST
+    // 5. Calculate price
     const goldValue  = weight * goldRate;
     const making     = (makingPct / 100) * goldValue;
     const gst        = (GST_PCT / 100) * (goldValue + making);
     const finalPrice = goldValue + making + gst;
 
-    // 6. Update variant price in Shopify
-    await axios.put(
-      `https://${SHOPIFY_STORE}/admin/api/2024-01/variants/${variantId}.json`,
-      { variant: { id: variantId, price: finalPrice.toFixed(2) } },
-      { headers }
+    // 6. Update variant price
+    const updateRes = await shopifyRequest(
+      "PUT",
+      `/variants/${variantId}.json`,
+      { variant: { id: parseInt(variantId), price: finalPrice.toFixed(2) } },
+      SHOPIFY_TOKEN
     );
 
-    console.log(`✅ Updated: ${variantTitle} → ₹${finalPrice.toFixed(2)}`);
+    if (updateRes.status !== 200) {
+      return res.status(500).json({ error: "Failed to update variant price", status: updateRes.status });
+    }
 
     return res.status(200).json({
       success: true,
       variant: variantTitle,
       price: finalPrice.toFixed(2),
       breakdown: {
-        weight,
-        goldRate,
+        weight, goldRate,
         goldValue:  goldValue.toFixed(2),
         making:     making.toFixed(2),
         gst:        gst.toFixed(2),
@@ -122,7 +135,6 @@ module.exports = async (req, res) => {
     });
 
   } catch (err) {
-    console.error("Error:", err.message);
     return res.status(500).json({ error: err.message });
   }
 };
