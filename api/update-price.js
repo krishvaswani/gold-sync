@@ -1,9 +1,9 @@
 const https = require("https");
 
-const SHOPIFY_STORE = "nimiraa.com";
+const SHOPIFY_STORE = "nimiraa.myshopify.com";
 const GST_PCT = 3;
 
-console.log(bg is working);
+console.log("bg is working");
 
 const PURITY_KEYS = {
   "9K":  "gold_rate_9k",
