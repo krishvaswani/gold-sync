@@ -3,6 +3,8 @@ const https = require("https");
 const SHOPIFY_STORE = "nimiraa.com";
 const GST_PCT = 3;
 
+console.log(bg is working);
+
 const PURITY_KEYS = {
   "9K":  "gold_rate_9k",
   "14K": "gold_rate_14k",
