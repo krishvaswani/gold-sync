@@ -1,6 +1,6 @@
 const https = require("https");
 
-const SHOPIFY_STORE = "nimiraa.myshopify.com";
+const SHOPIFY_STORE = "nimiraaofficial.myshopify.com";
 const GST_PCT = 3;
 
 console.log("bg is working");
