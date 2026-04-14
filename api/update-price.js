@@ -1,6 +1,6 @@
 const https = require("https");
 
-const SHOPIFY_STORE = "keniwear.myshopify.com";
+const SHOPIFY_STORE = "nimiraa.com";
 const GST_PCT = 3;
 
 const PURITY_KEYS = {
